@@ -1,0 +1,157 @@
+name: Build Latest Clang with Polly for Linux AArch64
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    
+    steps:
+      - name: Build Latest Clang for Alpine AArch64
+        run: |
+          mkdir -p /tmp/clang-build
+          cd /tmp/clang-build
+          
+          docker run --rm \
+            --volume="/tmp/clang-build:/workspace" \
+            --workdir="/workspace" \
+            alpine:latest sh -c "
+            set -ex
+            
+            # Update Alpine dan install tools
+            apk update
+            apk add --no-cache \
+              build-base \
+              cmake \
+              ninja \
+              git \
+              wget \
+              tar \
+              xz \
+              python3 \
+              linux-headers \
+              musl-dev \
+              gcc-aarch64-linux-musl \
+              g++-aarch64-linux-musl \
+              binutils-aarch64-linux-musl
+            
+            # Versi TERBARU: LLVM 18.1.8 (November 2024)
+            echo 'Downloading LLVM 18.1.8 (latest stable)...'
+            wget -q https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-project-18.1.8.src.tar.xz
+            tar -xf llvm-project-18.1.8.src.tar.xz
+            
+            # Struktur sudah benar di versi baru
+            # llvm-project-18.1.8.src/
+            # ├── llvm/
+            # ├── clang/ (sudah ada di llvm/tools/cfe)
+            # └── polly/ (sudah ada di llvm/tools/polly)
+            
+            # 1. Build Host Tools (untuk X86, di Alpine musl)
+            mkdir build-host && cd build-host
+            cmake ../llvm-project-18.1.8.src/llvm -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLLVM_TARGETS_TO_BUILD='X86' \
+              -DLLVM_ENABLE_PROJECTS='clang' \
+              -DLLVM_ENABLE_ZLIB=OFF \
+              -DLLVM_ENABLE_TERMINFO=OFF \
+              -DLLVM_ENABLE_LIBEDIT=OFF \
+              -DLLVM_ENABLE_LIBXML2=OFF \
+              -DLLVM_INCLUDE_TESTS=OFF \
+              -DLLVM_INCLUDE_EXAMPLES=OFF \
+              -DLLVM_INCLUDE_UTILS=OFF \
+              -DLLVM_INCLUDE_BENCHMARKS=OFF
+            ninja llvm-tblgen clang-tblgen
+            cd ..
+            
+            # 2. Build untuk AArch64 dengan Polly
+            mkdir build-aarch64 && cd build-aarch64
+            
+            # Gunakan cross-compiler dari Alpine (aarch64-linux-musl)
+            export CC=aarch64-linux-musl-gcc
+            export CXX=aarch64-linux-musl-g++
+            
+            cmake ../llvm-project-18.1.8.src/llvm -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLLVM_ENABLE_PROJECTS='clang;polly' \
+              -DLLVM_TARGETS_TO_BUILD='AArch64' \
+              -DLLVM_DEFAULT_TARGET_TRIPLE=aarch64-linux-musl \
+              -DCMAKE_CROSSCOMPILING=True \
+              -DCMAKE_SYSTEM_NAME=Linux \
+              -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+              -DCMAKE_C_COMPILER=aarch64-linux-musl-gcc \
+              -DCMAKE_CXX_COMPILER=aarch64-linux-musl-g++ \
+              -DCMAKE_C_FLAGS='-fPIC' \
+              -DCMAKE_CXX_FLAGS='-fPIC' \
+              -DLLVM_TABLEGEN=/workspace/build-host/bin/llvm-tblgen \
+              -DCLANG_TABLEGEN=/workspace/build-host/bin/clang-tblgen \
+              -DLLVM_POLLY_LINK_INTO_TOOLS=ON \
+              -DLLVM_INCLUDE_TESTS=OFF \
+              -DLLVM_INCLUDE_EXAMPLES=OFF \
+              -DLLVM_INCLUDE_UTILS=OFF \
+              -DLLVM_INCLUDE_BENCHMARKS=OFF \
+              -DLLVM_ENABLE_ZLIB=OFF \
+              -DLLVM_ENABLE_TERMINFO=OFF \
+              -DLLVM_ENABLE_LIBEDIT=OFF \
+              -DLLVM_ENABLE_LIBXML2=OFF \
+              -DLLVM_ENABLE_RTTI=OFF \
+              -DLLVM_ENABLE_EH=OFF \
+              -DCMAKE_INSTALL_PREFIX=/workspace/clang-latest-aarch64
+            
+            echo 'Building Clang 18.1.8 for AArch64...'
+            CPU_CORES=\$(nproc)
+            ninja -j\$CPU_CORES
+            ninja install
+            
+            cd ..
+            
+            # 3. Package untuk Alpine
+            echo 'Creating Alpine package...'
+            cd clang-latest-aarch64
+            
+            # Buat symlinks untuk Alpine
+            cd bin
+            ln -sf clang-18 clang
+            ln -sf clang clang++
+            ln -sf clang cc
+            ln -sf clang++ c++
+            cd ..
+            
+            # Buat README
+            cat > README.md << 'EOF'
+            # Clang 18.1.8 for Alpine Linux AArch64
+            - Version: 18.1.8 (latest stable)
+            - Target: aarch64-linux-musl
+            - Features: Clang + Polly optimizer
+            - Built on: Alpine Linux with musl libc
+            - Date: $(date)
+            
+            Usage on Alpine AArch64:
+            1. Extract: tar -xzvf clang-alpine-aarch64.tar.gz -C /usr/local
+            2. Add to PATH: export PATH=/usr/local/bin:\$PATH
+            3. Test: clang --version
+            
+            For static linking (musl advantage):
+            clang -static program.c -o program
+            EOF
+            
+            # Package
+            cd /workspace
+            tar -czvf clang-alpine-aarch64.tar.gz clang-latest-aarch64/
+            
+            echo '=== BUILD SUCCESS ==='
+            echo 'File: clang-alpine-aarch64.tar.gz'
+            echo 'Size: ' && du -sh clang-alpine-aarch64.tar.gz
+            echo 'Version: ' && cat clang-latest-aarch64/README.md | head -5
+          "
+          
+          # Copy hasil ke workspace GitHub
+          cp /tmp/clang-build/clang-alpine-aarch64.tar.gz ${{ github.workspace }}/
+          
+      - name: Upload Latest Clang for Alpine
+        uses: actions/upload-artifact@v4
+        with:
+          name: clang-18-alpine-aarch64
+          path: clang-alpine-aarch64.tar.gz
+          retention-days: 30
